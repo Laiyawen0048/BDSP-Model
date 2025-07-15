@@ -1,0 +1,14 @@
+﻿文件名,一级分类,二级分类
+数据1.xlsx,structure_data,cross_sectional_data
+数据10.tif,unstructured_data,raster
+数据2.xlsx,structure_data,time_series_data
+数据3.xlsx,structure_data,panel_data
+数据4.txt,unstructured_data,text
+数据5.txt,unstructured_data,text
+数据6.txt,unstructured_data,text
+数据7 (1).png,unstructured_data,image
+数据7 (2).png,unstructured_data,image
+数据7 (3).png,unstructured_data,image
+数据7 (4).png,unstructured_data,image
+数据8.m4a,unstructured_data,audio
+数据9.tif,unstructured_data,raster
