@@ -1,0 +1,7 @@
+venv/
+*.dll
+*.exe
+*.zip
+*.rar
+*.gpkg
+__pycache__/
