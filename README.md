@@ -1,5 +1,3 @@
-#README
-
 # BDSP-Model
 
 ## 项目简介
