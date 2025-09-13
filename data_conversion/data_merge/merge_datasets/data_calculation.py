@@ -1,12 +1,10 @@
-﻿import os
+import os
 import sys
 import pandas as pd
 
 # ---------------- 配置：数据源路径（支持 CSV/Excel） ----------------
-# 你给定的数据基础路径（不带后缀也可以，程序会尝试不同后缀）
 BASE_PATH_NO_EXT = r"C:\Users\沐阳\PycharmProjects\pythonProject3\BDSP-Model\data_conversion\data_merge\filter_data\filtered_result"
 
-# 若你更偏好固定文件名（如 filtered_result.xlsx），可设置：
 PREFERRED_FILENAMES = [
     "filtered_result.xlsx",
     "filtered_result.xls",
@@ -28,7 +26,6 @@ def try_load_dataframe():
     2) 使用 BASE_PATH_NO_EXT + 常见后缀
     返回：DataFrame, 实际文件路径
     """
-    # 构造候选路径列表
     base_dir = os.path.dirname(BASE_PATH_NO_EXT)
     base_name = os.path.basename(BASE_PATH_NO_EXT)
     candidates = []
@@ -47,7 +44,7 @@ def try_load_dataframe():
     for p in candidates:
         if p not in seen:
             unique_candidates.append(p)
-            seen.add(p)
+        seen.add(p)
 
     # 逐个尝试读取
     for path in unique_candidates:
@@ -56,7 +53,10 @@ def try_load_dataframe():
                 if path.lower().endswith(".csv"):
                     df = pd.read_csv(path)
                 else:
-                    df = pd.read_excel(path, engine="openpyxl")
+                    try:
+                        df = pd.read_excel(path, engine="openpyxl")
+                    except Exception:
+                        df = pd.read_excel(path)
                 return df, path
             except Exception as e:
                 print(f"尝试读取失败：{path} -> {e}")
@@ -87,21 +87,42 @@ def prompt_choice(prompt, choices, allow_all=False, default=None):
             return val
         print(f"输入无效，请在 {sorted(list(choices_set))}" + (" 或 all" if allow_all else "") + " 中选择。")
 
-def compute_stats(series: pd.Series, ops: list[str]) -> dict:
+def compute_stats(series: pd.Series, ops: list[str], with_count: bool = True) -> dict:
     """
     对单个数值序列按 ops 计算统计值。
     ops 可包含：'mean', 'sum', 'median', 'mode'
     返回：{指标名: 数值}
-    说明：众数可能返回多个值，这里取第一个众数；若没有众数则返回 NaN。
+    说明：
+    - 先转换为数值，非数值置为 NaN
+    - 若全为 NaN，直接返回各项 NaN（避免 numpy 发出 empty slice 警告）
+    - 众数可能返回多个值，这里取第一个众数；若没有众数则返回 NaN。
+    - 可选返回有效样本数 count
     """
     s = pd.to_numeric(series, errors="coerce")
     result = {}
+
+    # 记录有效样本数，便于诊断数据稀疏性
+    if with_count:
+        result["count"] = int(s.notna().sum())
+
+    if s.notna().sum() == 0:
+        # 全 NaN，直接填 NaN，避免 numpy 的 RuntimeWarning
+        if "mean" in ops:
+            result["mean"] = float("nan")
+        if "sum" in ops:
+            result["sum"] = float("nan")
+        if "median" in ops:
+            result["median"] = float("nan")
+        if "mode" in ops:
+            result["mode"] = float("nan")
+        return result
+
     if "mean" in ops:
-        result["mean"] = s.mean()
+        result["mean"] = s.mean(skipna=True)
     if "sum" in ops:
-        result["sum"] = s.sum()
+        result["sum"] = s.sum(skipna=True)
     if "median" in ops:
-        result["median"] = s.median()
+        result["median"] = s.median(skipna=True)
     if "mode" in ops:
         m = s.mode(dropna=True)
         result["mode"] = m.iloc[0] if len(m) > 0 else float("nan")
@@ -110,12 +131,7 @@ def compute_stats(series: pd.Series, ops: list[str]) -> dict:
 def normalize_ops(user_op: str) -> list[str]:
     """
     将用户输入的运算关键词标准化为内部代码列表。
-    用户可能输入中文或英文，支持：
-    - 平均数/平均/均值/mean
-    - 总和数/总和/求和/sum
-    - 中位数/median
-    - 众数/mode
-    - all -> 四项全选
+    支持中英文；支持逗号分隔；支持 'all'
     """
     mapping = {
         "平均数": "mean", "平均": "mean", "均值": "mean", "mean": "mean",
@@ -125,50 +141,83 @@ def normalize_ops(user_op: str) -> list[str]:
     }
     if user_op == "all":
         return ["mean", "sum", "median", "mode"]
-    # 支持逗号分隔多项，如 "平均数, 总和数"
     tokens = [t.strip().lower() for t in user_op.replace("，", ",").split(",") if t.strip() != ""]
     out = []
     for t in tokens:
-        # 反向查找中文键：先尝试直接命中英文，再遍历中文
         if t in mapping:
             out.append(mapping[t])
         else:
-            # 尝试中文匹配（小写不影响中文）
             for k, v in mapping.items():
                 if t == k.lower():
                     out.append(v)
                     break
-    # 去重同时保持顺序
     seen = set()
     uniq = []
     for x in out:
         if x not in seen:
             uniq.append(x)
             seen.add(x)
-    # 若为空，默认给出全部
     return uniq if uniq else ["mean", "sum", "median", "mode"]
 
-def save_result(df_out: pd.DataFrame, suffix: str):
+def ensure_unique_path(path: str) -> str:
     """
-    将结果保存到脚本同一路径：
-    - 优先保存 CSV：stats_result_<suffix>.csv
-    - 同时保存 Excel：stats_result_<suffix>.xlsx（如安装 openpyxl）
+    若路径已存在，自动添加 (1), (2), ... 后缀直至不冲突。
+    """
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    i = 1
+    while True:
+        new_path = f"{base}({i}){ext}"
+        if not os.path.exists(new_path):
+            return new_path
+        i += 1
+
+def save_result(df_out: pd.DataFrame, suffix: str, save_mode: str):
+    """
+    将结果保存到脚本同一路径，按 save_mode 控制：
+    - 'csv': 仅保存 CSV -> stats_result_<suffix>.csv
+    - 'xlsx': 仅保存 Excel -> stats_result_<suffix>.xlsx（需 openpyxl 或默认引擎）
+    - 'both': 同时保存 CSV 和 Excel
+    - 'none': 不保存（仅预览）
     """
     script_dir = get_script_dir()
     base = f"stats_result_{suffix}"
-    csv_path = os.path.join(script_dir, base + ".csv")
-    xlsx_path = os.path.join(script_dir, base + ".xlsx")
+    csv_path = ensure_unique_path(os.path.join(script_dir, base + ".csv"))
+    xlsx_path = ensure_unique_path(os.path.join(script_dir, base + ".xlsx"))
 
-    # 保存 CSV
-    df_out.to_csv(csv_path, index=False, encoding="utf-8-sig")
-    print(f"结果已保存 CSV：{csv_path}")
+    def save_csv():
+        df_out.to_csv(csv_path, index=False, encoding="utf-8-sig")
+        print(f"结果已保存 CSV：{csv_path}")
 
-    # 可选保存 Excel
-    try:
-        df_out.to_excel(xlsx_path, index=False, engine="openpyxl")
+    def save_xlsx():
+        # 优先 openpyxl，无法使用时退回默认引擎
+        try:
+            df_out.to_excel(xlsx_path, index=False, engine="openpyxl")
+        except Exception:
+            df_out.to_excel(xlsx_path, index=False)
         print(f"结果已保存 Excel：{xlsx_path}")
-    except Exception as e:
-        print("Excel 保存失败（可选）。如需 Excel，请安装 openpyxl：pip install openpyxl")
+
+    if save_mode == "none":
+        print("按选择不保存到文件。")
+        return
+    elif save_mode == "csv":
+        save_csv()
+    elif save_mode == "xlsx":
+        try:
+            import openpyxl  # noqa: F401
+        except Exception:
+            print("提示：未检测到 openpyxl，已尝试使用默认引擎保存 Excel。若失败请安装：pip install openpyxl")
+        save_xlsx()
+    elif save_mode == "both":
+        save_csv()
+        try:
+            import openpyxl  # noqa: F401
+        except Exception:
+            print("提示：未检测到 openpyxl，已尝试使用默认引擎保存 Excel。若失败请安装：pip install openpyxl")
+        save_xlsx()
+    else:
+        print("未知保存模式，已跳过保存。")
 
 # ---------------- 主程序 ----------------
 def main():
@@ -198,7 +247,7 @@ def main():
         print("有效字段为空，程序结束。")
         return
 
-    # 选择计算方式：平均数、总和数、中位数、众数 或 all
+    # 选择计算方式
     print("\n请输入计算方式（支持中文或英文，多个用逗号；或输入 all 表示全部）：")
     print("- 平均数/平均/均值/mean")
     print("- 总和数/总和/求和/sum")
@@ -224,6 +273,14 @@ def main():
             if not group_cols:
                 print("有效分组字段为空，将对全表进行统计。")
 
+    # 保存方式选择
+    print("\n请选择保存方式：")
+    print("- csv: 仅保存为 CSV")
+    print("- xlsx: 仅保存为 Excel")
+    print("- both: 同时保存 CSV 和 Excel")
+    print("- none: 不保存（仅预览）")
+    save_mode = prompt_choice("你的选择 [默认: csv]：", choices=["csv", "xlsx", "both", "none"], default="csv")
+
     # 计算
     results = []
     if group_cols:
@@ -235,7 +292,7 @@ def main():
                 keys = (keys,)
             base_row = {gc: val for gc, val in zip(group_cols, keys)}
             for col in target_cols:
-                stats = compute_stats(subdf[col], ops)
+                stats = compute_stats(subdf[col], ops, with_count=True)
                 row = {**base_row, "field": col, **stats}
                 results.append(row)
         result_df = pd.DataFrame(results)
@@ -246,7 +303,7 @@ def main():
     else:
         # 不分组，对每个字段全表计算
         for col in target_cols:
-            stats = compute_stats(df[col], ops)
+            stats = compute_stats(df[col], ops, with_count=True)
             row = {"field": col, **stats}
             results.append(row)
         result_df = pd.DataFrame(results).sort_values(by=["field"], kind="stable")
@@ -256,7 +313,7 @@ def main():
     print("\n统计结果（预览前10行）：")
     print(result_df.head(10))
 
-    save_result(result_df, suffix=save_suffix)
+    save_result(result_df, suffix=save_suffix, save_mode=save_mode)
 
     print("\n完成。")
 
